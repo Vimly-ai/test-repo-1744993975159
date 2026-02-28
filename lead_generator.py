@@ -34,80 +34,45 @@ from openpyxl.utils import get_column_letter
 # Constants
 # ---------------------------------------------------------------------------
 
+# Top 5 Treasure Valley cities by population / market size
 CITIES = [
     "Boise",
     "Meridian",
     "Nampa",
     "Caldwell",
     "Eagle",
-    "Star",
-    "Kuna",
-    "Garden City",
-    "Middleton",
-    "Emmett",
 ]
 
+# 20 high-value service niches (local-pack focus)
 CATEGORIES = [
     "Plumber",
-    "Plumbing",
     "Electrician",
-    "Electrical contractor",
     "Roofer",
-    "Roofing contractor",
     "HVAC",
-    "Heating and cooling",
     "Pest control",
     "Landscaping",
-    "Lawn care",
     "Auto repair",
-    "Mechanic",
     "Cleaning service",
-    "House cleaning",
-    "Janitorial",
     "Handyman",
     "Painter",
-    "Painting contractor",
     "Concrete contractor",
     "Fencing contractor",
     "Tree service",
-    "Tree removal",
     "Garage door repair",
-    "Appliance repair",
     "Carpet cleaning",
-    "Window cleaning",
-    "Pressure washing",
-    "Power washing",
     "Locksmith",
-    "Septic service",
-    "Irrigation",
-    "Sprinkler repair",
-    "Flooring contractor",
-    "Tile contractor",
-    "Cabinet maker",
-    "Kitchen remodel",
-    "Bathroom remodel",
     "General contractor",
-    "Foundation repair",
-    "Gutter cleaning",
-    "Gutter installation",
-    "Drywall contractor",
-    "Insulation contractor",
-    "Siding contractor",
-    "Deck builder",
-    "Pool service",
-    "Pool cleaning",
     "Moving company",
     "Junk removal",
-    "Chimney sweep",
-    "Glass repair",
-    "Window repair",
-    "Welding service",
-    "Excavation contractor",
-    "Paving contractor",
+    "Flooring contractor",
 ]
+
+# How many results to keep per query (top local-pack positions)
+LOCAL_PACK_LIMIT = 7
 
 ALL_BUSINESSES_CSV = "all_businesses.csv"
 WEBSITES_CSV = "businesses_with_websites.csv"
+NO_WEBSITE_CSV = "businesses_no_website.csv"
 CHECKED_CSV = "businesses_checked.csv"
 DEFAULT_OUTPUT = "treasure_valley_leads.xlsx"
 
@@ -230,17 +195,23 @@ def parse_place(place, search_category):
 
 
 def scrape_places(api_key):
-    """Scrape all businesses from the Google Places API."""
+    """Scrape top local-pack businesses from the Google Places API.
+
+    Only keeps the top LOCAL_PACK_LIMIT results per query (simulating the
+    top positions in the Google local pack).  Does NOT paginate — we only
+    want businesses that rank highly.
+    """
     all_businesses = {}  # place_id -> business dict
     total_queries = len(CITIES) * len(CATEGORIES)
     completed = 0
 
     print(f"\n{'='*60}")
-    print("STEP 1: Scraping Google Places API")
+    print("STEP 1: Scraping Google Places API (top {0} local pack)".format(LOCAL_PACK_LIMIT))
     print(f"{'='*60}")
     print(f"Cities: {len(CITIES)}")
-    print(f"Categories: {len(CATEGORIES)}")
+    print(f"Niches: {len(CATEGORIES)}")
     print(f"Total queries: {total_queries}")
+    print(f"Max results per query: {LOCAL_PACK_LIMIT}")
     print()
 
     for city in CITIES:
@@ -249,37 +220,33 @@ def scrape_places(api_key):
             completed += 1
 
             try:
-                page_token = None
-                page_num = 1
-                while True:
-                    data = search_places(api_key, query, page_token)
-                    places = data.get("places", [])
+                # Single request — no pagination. We only want top-ranking
+                # businesses (positions 1-7 in the local pack).
+                data = search_places(api_key, query)
+                places = data.get("places", [])
 
-                    new_count = 0
-                    for place in places:
-                        biz = parse_place(place, category)
+                # Keep only the top LOCAL_PACK_LIMIT results
+                places = places[:LOCAL_PACK_LIMIT]
 
-                        # Only keep OPERATIONAL businesses
-                        if biz["business_status"] != "OPERATIONAL":
-                            continue
+                new_count = 0
+                for place in places:
+                    biz = parse_place(place, category)
 
-                        pid = biz["place_id"]
-                        if pid and pid not in all_businesses:
-                            all_businesses[pid] = biz
-                            new_count += 1
+                    # Only keep OPERATIONAL businesses
+                    if biz["business_status"] != "OPERATIONAL":
+                        continue
 
-                    progress = f"[{completed}/{total_queries}]"
-                    print(
-                        f"  {progress} {query} — "
-                        f"page {page_num}, {len(places)} results, "
-                        f"{new_count} new  (total unique: {len(all_businesses)})"
-                    )
+                    pid = biz["place_id"]
+                    if pid and pid not in all_businesses:
+                        all_businesses[pid] = biz
+                        new_count += 1
 
-                    page_token = data.get("nextPageToken")
-                    if not page_token:
-                        break
-                    page_num += 1
-                    time.sleep(0.15)
+                progress = f"[{completed}/{total_queries}]"
+                print(
+                    f"  {progress} {query} — "
+                    f"{len(places)} results, "
+                    f"{new_count} new  (total unique: {len(all_businesses)})"
+                )
 
             except requests.exceptions.HTTPError as e:
                 print(f"  [ERROR] {query}: HTTP {e.response.status_code} — {e}")
@@ -288,22 +255,25 @@ def scrape_places(api_key):
 
             time.sleep(0.15)
 
-    # Split into all vs. with-websites
+    # Split into: with websites / without websites
     all_list = list(all_businesses.values())
     with_websites = [b for b in all_list if b.get("website_url")]
+    no_websites = [b for b in all_list if not b.get("website_url")]
 
     print(f"\n{'─'*60}")
     print(f"Total unique businesses found: {len(all_list)}")
-    print(f"Businesses with website URLs:  {len(with_websites)}")
-    print(f"Businesses without websites:   {len(all_list) - len(with_websites)}")
+    print(f"Businesses WITH website URLs:  {len(with_websites)}")
+    print(f"Businesses WITHOUT websites:   {len(no_websites)}")
     print(f"{'─'*60}\n")
 
     # Save CSVs
     _write_csv(ALL_BUSINESSES_CSV, CSV_FIELDS, all_list)
     _write_csv(WEBSITES_CSV, CSV_FIELDS, with_websites)
+    _write_csv(NO_WEBSITE_CSV, CSV_FIELDS, no_websites)
 
-    print(f"Saved {ALL_BUSINESSES_CSV} ({len(all_list)} rows)")
-    print(f"Saved {WEBSITES_CSV} ({len(with_websites)} rows)")
+    print(f"Saved {ALL_BUSINESSES_CSV}  ({len(all_list)} rows)")
+    print(f"Saved {WEBSITES_CSV}  ({len(with_websites)} rows)")
+    print(f"Saved {NO_WEBSITE_CSV}  ({len(no_websites)} rows)")
 
     return with_websites
 
@@ -732,12 +702,19 @@ def _color_rows(ws, tier_col_idx):
 
 
 def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
-    """Generate the Excel report."""
+    """Generate the Excel report.
+
+    ``businesses`` contains checked businesses (those that had a website URL).
+    The no-website list is loaded separately from NO_WEBSITE_CSV.
+    """
     if businesses is None:
         businesses = _read_csv(CHECKED_CSV, CHECKED_FIELDS)
         if not businesses:
             print(f"ERROR: No checked data found. Run --step check first or check {CHECKED_CSV}")
             return
+
+    # Load businesses that had no website link in their GBP
+    no_website_biz = _read_csv(NO_WEBSITE_CSV, CSV_FIELDS)
 
     print(f"\n{'='*60}")
     print("STEP 3: Generating Excel Report")
@@ -747,7 +724,7 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
     tier2 = [b for b in businesses if b.get("tier") == "Tier 2"]
     active = [b for b in businesses if b.get("tier") == "Active"]
 
-    # Sort leads by review count descending
+    # Sort leads by review count descending (highest reviews = best leads)
     def sort_key(b):
         try:
             return -int(float(b.get("review_count", 0)))
@@ -775,9 +752,11 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
     # Overview stats
     ws_summary.cell(row=row, column=1, value="Overview").font = section_font
     row += 1
+    total_all = len(businesses) + len(no_website_biz)
     stats = [
-        ("Total businesses scanned", len(businesses)),
-        ("Total with websites", len(businesses)),
+        ("Total businesses scraped (top {0} local pack)".format(LOCAL_PACK_LIMIT), total_all),
+        ("Businesses with GBP website link", len(businesses)),
+        ("Businesses WITHOUT website link", len(no_website_biz)),
         ("Confirmed landers (Tier 1)", len(tier1)),
         ("Suspicious (Tier 2)", len(tier2)),
         ("Active sites", len(active)),
@@ -803,8 +782,8 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
 
     row += 1
 
-    # Breakdown by category
-    ws_summary.cell(row=row, column=1, value="Breakdown by Business Category").font = section_font
+    # Breakdown by category (leads only)
+    ws_summary.cell(row=row, column=1, value="Leads by Business Category").font = section_font
     row += 1
     cat_counts = {}
     for b in tier1 + tier2:
@@ -817,8 +796,8 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
 
     row += 1
 
-    # Breakdown by city
-    ws_summary.cell(row=row, column=1, value="Breakdown by City").font = section_font
+    # Breakdown by city (leads only)
+    ws_summary.cell(row=row, column=1, value="Leads by City").font = section_font
     row += 1
     city_counts = {}
     for b in tier1 + tier2:
@@ -829,7 +808,7 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
         ws_summary.cell(row=row, column=2, value=count).font = normal_font
         row += 1
 
-    ws_summary.column_dimensions["A"].width = 40
+    ws_summary.column_dimensions["A"].width = 45
     ws_summary.column_dimensions["B"].width = 15
 
     # ---- Sheet 2: Confirmed Leads (Tier 1) ----
@@ -853,7 +832,44 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
     _auto_width(ws_suspicious)
     _color_rows(ws_suspicious, tier_col)
 
-    # ---- Sheet 4: All Businesses ----
+    # ---- Sheet 4: No Website ----
+    # Businesses ranking in the local pack but with NO website link in GBP.
+    # These are a separate outreach list — not Tier 1/Tier 2 leads.
+    NO_WEBSITE_COLUMNS = [
+        "Business Name",
+        "Category",
+        "Phone Number",
+        "Address",
+        "City",
+        "Rating",
+        "Review Count",
+        "Google Maps Link",
+        "Notes",
+    ]
+
+    def _no_website_row(biz):
+        return (
+            biz.get("business_name", ""),
+            biz.get("category", ""),
+            biz.get("phone", ""),
+            biz.get("address", ""),
+            biz.get("city", ""),
+            biz.get("rating", ""),
+            biz.get("review_count", 0),
+            biz.get("google_maps_url", ""),
+            "No website link on GBP — never had a site or removed it",
+        )
+
+    no_website_biz_sorted = sorted(no_website_biz, key=sort_key)
+    ws_nosite = wb.create_sheet("No Website")
+    ws_nosite.sheet_properties.tabColor = "808080"
+    ws_nosite.append(NO_WEBSITE_COLUMNS)
+    for biz in no_website_biz_sorted:
+        ws_nosite.append(_no_website_row(biz))
+    _style_header(ws_nosite)
+    _auto_width(ws_nosite)
+
+    # ---- Sheet 5: All Businesses ----
     ws_all = wb.create_sheet("All Businesses")
     ws_all.sheet_properties.tabColor = "2F5496"
     ws_all.append(REPORT_COLUMNS)
@@ -869,7 +885,8 @@ def generate_report(businesses=None, output_file=DEFAULT_OUTPUT):
     print(f"  Sheet 'Summary':         Overview stats and breakdowns")
     print(f"  Sheet 'Confirmed Leads': {len(tier1)} Tier 1 leads (sorted by reviews)")
     print(f"  Sheet 'Suspicious':      {len(tier2)} Tier 2 leads")
-    print(f"  Sheet 'All Businesses':  {len(businesses)} total entries")
+    print(f"  Sheet 'No Website':      {len(no_website_biz)} businesses without GBP website")
+    print(f"  Sheet 'All Businesses':  {len(businesses)} total checked entries")
     print()
 
 
