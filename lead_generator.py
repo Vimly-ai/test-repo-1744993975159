@@ -149,6 +149,124 @@ PARKING_DOMAINS = {
     "buydomains.com",
 }
 
+# Known website builder / SaaS platform domains.
+# When a custom domain's subscription or DNS lapses, these platforms
+# redirect the domain back to their own default / expired pages.
+BUILDER_DOMAINS = {
+    # Wix
+    "wix.com": "Wix",
+    "wixsite.com": "Wix",
+    "editmysite.com": "Wix",
+    # Squarespace
+    "squarespace.com": "Squarespace",
+    "sqsp.com": "Squarespace",
+    # Weebly
+    "weebly.com": "Weebly",
+    # WordPress.com (NOT self-hosted WordPress)
+    "wordpress.com": "WordPress.com",
+    # Shopify
+    "shopify.com": "Shopify",
+    "myshopify.com": "Shopify",
+    # Webflow
+    "webflow.io": "Webflow",
+    "webflow.com": "Webflow",
+    # Jimdo
+    "jimdo.com": "Jimdo",
+    "jimdosite.com": "Jimdo",
+    # Duda
+    "dudaone.com": "Duda",
+    "duda.co": "Duda",
+    # Strikingly
+    "strikingly.com": "Strikingly",
+    # Site123
+    "site123.com": "Site123",
+    # GoDaddy site builder
+    "godaddysites.com": "GoDaddy Builder",
+    # Square Online
+    "square.site": "Square Online",
+    "squareup.com": "Square Online",
+    # Cargo
+    "cargo.site": "Cargo",
+    "cargocollective.com": "Cargo",
+    # Others
+    "yola.com": "Yola",
+    "homestead.com": "Homestead",
+    "webnode.com": "Webnode",
+    "ucraft.com": "Ucraft",
+    "tilda.cc": "Tilda",
+    "tilda.ws": "Tilda",
+    "simplesite.com": "SimpleSite",
+    "leadpages.net": "Leadpages",
+    "clickfunnels.com": "ClickFunnels",
+    "kajabi.com": "Kajabi",
+    "unbounce.com": "Unbounce",
+    "instapage.com": "Instapage",
+    "landingi.com": "Landingi",
+    "format.com": "Format",
+    "pixpa.com": "Pixpa",
+    "showit.co": "Showit",
+    "zenfolio.com": "Zenfolio",
+    "smugmug.com": "SmugMug",
+    "bigcartel.com": "Big Cartel",
+    "ecwid.com": "Ecwid",
+    "volusion.com": "Volusion",
+    "shift4shop.com": "Shift4Shop",
+    "bigcommerce.com": "BigCommerce",
+    "mybigcommerce.com": "BigCommerce",
+}
+
+# Phrases in page content that indicate a site has expired, been
+# deactivated, or is otherwise no longer active.
+EXPIRED_CONTENT_PHRASES = [
+    "this domain has flown away",
+    "renew your wix premium plan",
+    "this site is not currently active",
+    "site is expired",
+    "site has expired",
+    "website has expired",
+    "website is expired",
+    "this site has been archived",
+    "this site has been suspended",
+    "this website has been deactivated",
+    "this site is no longer active",
+    "this website is no longer active",
+    "this store is currently unavailable",
+    "only the store owner can visit",
+    "trial has ended",
+    "site is not published",
+    "this online store isn't available",
+    "this site is currently unavailable",
+    "this blog is no longer available",
+    "this blog has been archived",
+    "this website is under construction and will be available soon",
+]
+
+# Strings found in HTML source (scripts, stylesheets, CDN URLs, meta tags)
+# that identify which builder platform is serving the page.
+BUILDER_CONTENT_MARKERS = {
+    "wix.com": "Wix",
+    "wixstatic.com": "Wix",
+    "parastorage.com": "Wix",
+    "squarespace.com": "Squarespace",
+    "sqsp.com": "Squarespace",
+    "squarespace-cdn.com": "Squarespace",
+    "weebly.com": "Weebly",
+    "weeblycloud.com": "Weebly",
+    "shopify.com": "Shopify",
+    "cdn.shopify.com": "Shopify",
+    "webflow.com": "Webflow",
+    "jimdo.com": "Jimdo",
+    "dudaone.com": "Duda",
+    "strikingly.com": "Strikingly",
+    "godaddysites.com": "GoDaddy Builder",
+    "squareup.com": "Square Online",
+    "square.site": "Square Online",
+    "kajabi.com": "Kajabi",
+    "leadpages.net": "Leadpages",
+    "clickfunnels.com": "ClickFunnels",
+    "unbounce.com": "Unbounce",
+}
+
 CSV_FIELDS = [
     "place_id",
     "business_name",
@@ -361,6 +479,39 @@ def scrape_places(api_key):
 # Step 2: Lander / Expired Domain Detection
 # ---------------------------------------------------------------------------
 
+def _match_builder_domain(domain):
+    """Return builder name if domain belongs to a known website builder, else None."""
+    domain = domain.lower()
+    for builder_domain, name in BUILDER_DOMAINS.items():
+        if domain == builder_domain or domain.endswith("." + builder_domain):
+            return name
+    return None
+
+
+def _identify_builder_from_content(content, final_domain):
+    """Try to identify the website builder from page content or final domain."""
+    builder = _match_builder_domain(final_domain)
+    if builder:
+        return builder
+    for marker, name in BUILDER_CONTENT_MARKERS.items():
+        if marker in content:
+            return name
+    return None
+
+
+def _format_duration(seconds):
+    """Format seconds into a human-readable duration string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = int(minutes // 60)
+    mins = minutes % 60
+    return f"{hours}h {mins}m"
+
+
 def classify_site(url):
     """
     Fetch a URL and classify whether it's an active site or a lander/expired domain.
@@ -402,6 +553,23 @@ def classify_site(url):
                 result["notes"] = f"Redirected to {resp.url}"
                 return result
 
+        # --- Website Builder Redirect (expired custom domain) ---
+        original_domain = urlparse(url).netloc.lower()
+        if original_domain != final_domain:
+            builder = _match_builder_domain(final_domain)
+            if builder:
+                result["lander_type"] = f"{builder} Expired (redirect)"
+                result["tier"] = "Tier 1"
+                result["notes"] = f"Redirected to {builder}: {resp.url}"
+                return result
+
+        # --- Redirect with tracking parameter (e.g. Wix redirectedFor) ---
+        if "redirectedfor=" in resp.url.lower():
+            result["lander_type"] = "Builder Expired (redirectedFor)"
+            result["tier"] = "Tier 1"
+            result["notes"] = f"redirectedFor in URL: {resp.url}"
+            return result
+
         # --- GoDaddy Forsale ---
         if (
             'window.location.href="/lander"' in content
@@ -430,14 +598,26 @@ def classify_site(url):
             result["tier"] = "Tier 1"
             return result
 
-        # --- Wix Expired ---
-        if (
-            (resp.status_code == 503 and ("wix" in content or "wixstatic" in content))
-            or "this domain has flown away" in content
-        ):
-            result["lander_type"] = "Wix Expired"
-            result["tier"] = "Tier 1"
-            return result
+        # --- Website Builder Expired (content-based) ---
+        for phrase in EXPIRED_CONTENT_PHRASES:
+            if phrase in content:
+                builder = _identify_builder_from_content(content, final_domain)
+                if builder:
+                    result["lander_type"] = f"{builder} Expired"
+                else:
+                    result["lander_type"] = "Site Expired"
+                result["tier"] = "Tier 1"
+                result["notes"] = f"Matched: '{phrase}'"
+                return result
+
+        # --- Website Builder 503 (platform error for expired site) ---
+        if resp.status_code == 503:
+            builder = _identify_builder_from_content(content, final_domain)
+            if builder:
+                result["lander_type"] = f"{builder} Expired (503)"
+                result["tier"] = "Tier 1"
+                result["notes"] = "503 status from builder platform"
+                return result
 
         # --- Domain For Sale (Generic) ---
         sale_phrases = [
@@ -484,14 +664,6 @@ def classify_site(url):
         ):
             result["lander_type"] = "HostGator Default"
             result["tier"] = "Tier 2"
-            return result
-
-        # --- Squarespace Expired ---
-        if "squarespace" in content and (
-            "expired" in content or "site is expired" in content
-        ):
-            result["lander_type"] = "Squarespace Expired"
-            result["tier"] = "Tier 1"
             return result
 
         # --- Hosting Suspended ---
@@ -552,6 +724,44 @@ def classify_site(url):
                 if parking in final_domain:
                     result["lander_type"] = f"Redirect to parking ({parking})"
                     result["tier"] = "Tier 1"
+                    return result
+
+            # Check for builder redirect
+            original_domain = urlparse(url).netloc.lower()
+            if original_domain != final_domain:
+                builder = _match_builder_domain(final_domain)
+                if builder:
+                    result["lander_type"] = f"{builder} Expired (redirect)"
+                    result["tier"] = "Tier 1"
+                    result["notes"] += f"; Redirected to {builder}: {resp.url}"
+                    return result
+
+            # Check for redirectedFor parameter
+            if "redirectedfor=" in resp.url.lower():
+                result["lander_type"] = "Builder Expired (redirectedFor)"
+                result["tier"] = "Tier 1"
+                result["notes"] += f"; redirectedFor in URL: {resp.url}"
+                return result
+
+            # Check expired content phrases
+            for phrase in EXPIRED_CONTENT_PHRASES:
+                if phrase in content:
+                    builder = _identify_builder_from_content(content, final_domain)
+                    if builder:
+                        result["lander_type"] = f"{builder} Expired"
+                    else:
+                        result["lander_type"] = "Site Expired"
+                    result["tier"] = "Tier 1"
+                    result["notes"] += f"; Matched: '{phrase}'"
+                    return result
+
+            # Check builder 503
+            if resp.status_code == 503:
+                builder = _identify_builder_from_content(content, final_domain)
+                if builder:
+                    result["lander_type"] = f"{builder} Expired (503)"
+                    result["tier"] = "Tier 1"
+                    result["notes"] += "; 503 from builder platform"
                     return result
 
             if len(resp.content) < 500:
@@ -634,7 +844,9 @@ def check_websites(businesses=None, workers=10):
     tier1_count = 0
     tier2_count = 0
     active_count = 0
+    error_count = 0
     completed = 0
+    start_time = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_biz = {
@@ -644,6 +856,11 @@ def check_websites(businesses=None, workers=10):
 
         for future in as_completed(future_to_biz):
             completed += 1
+            elapsed = time.time() - start_time
+            rate = completed / elapsed if elapsed > 0 else 0
+            remaining = (total - completed) / rate if rate > 0 else 0
+            pct = completed / total * 100
+
             try:
                 result = future.result()
                 checked.append(result)
@@ -660,8 +877,11 @@ def check_websites(businesses=None, workers=10):
                     marker = "✅"
 
                 print(
-                    f"  [{completed}/{total}] {marker} {result['business_name'][:40]:<40} "
-                    f"| {result.get('lander_type', 'Active')}"
+                    f"  [{completed}/{total} {pct:3.0f}%] {marker} "
+                    f"{result['business_name'][:35]:<35} "
+                    f"| {result.get('lander_type', 'Active'):<30} "
+                    f"| {_format_duration(elapsed)} elapsed, "
+                    f"~{_format_duration(remaining)} left"
                 )
             except Exception as e:
                 completed_biz = future_to_biz[future]
@@ -675,20 +895,46 @@ def check_websites(businesses=None, workers=10):
                 })
                 checked.append(completed_biz)
                 tier2_count += 1
-                print(f"  [{completed}/{total}] ❌ {completed_biz['business_name'][:40]:<40} | Error: {e}")
+                error_count += 1
+                print(
+                    f"  [{completed}/{total} {pct:3.0f}%] ❌ "
+                    f"{completed_biz['business_name'][:35]:<35} "
+                    f"| Error: {e}"
+                )
 
-            # Save intermediate results every 50 checks
-            if completed % 50 == 0:
+            # Periodic progress summary every 25 checks
+            if completed % 25 == 0 and completed < total:
+                _write_csv(CHECKED_CSV, CHECKED_FIELDS, checked)
+                print(f"\n  {'─'*56}")
+                print(
+                    f"  📊 Progress: {pct:.0f}% ({completed}/{total}) | "
+                    f"Rate: {rate:.1f}/sec | "
+                    f"ETA: {_format_duration(remaining)}"
+                )
+                print(
+                    f"     🔥 Tier 1: {tier1_count}  |  "
+                    f"⚠️  Tier 2: {tier2_count}  |  "
+                    f"✅ Active: {active_count}"
+                    + (f"  |  ❌ Errors: {error_count}" if error_count else "")
+                )
+                print(f"  {'─'*56}\n")
+
+            # Save intermediate results every 50 checks (in addition to
+            # the save at each 25-check summary)
+            elif completed % 50 == 0:
                 _write_csv(CHECKED_CSV, CHECKED_FIELDS, checked)
 
     # Final save
     _write_csv(CHECKED_CSV, CHECKED_FIELDS, checked)
+    total_time = time.time() - start_time
 
     print(f"\n{'─'*60}")
-    print(f"Results:")
+    print(f"Results ({_format_duration(total_time)} total, {total/total_time:.1f} URLs/sec):")
     print(f"  🔥 Tier 1 (Confirmed Landers): {tier1_count}")
     print(f"  ⚠️  Tier 2 (Suspicious):        {tier2_count}")
     print(f"  ✅ Active Sites:                {active_count}")
+    if error_count:
+        print(f"  ❌ Errors:                      {error_count}")
     print(f"{'─'*60}")
     print(f"Saved {CHECKED_CSV} ({len(checked)} rows)\n")
 
