@@ -106,6 +106,13 @@ CATEGORIES = [
 # How many results to keep per query (top local-pack positions)
 LOCAL_PACK_LIMIT = 7
 
+# Rate-limiting / batching for Google Places API
+BATCH_SIZE = 20            # queries per batch before pausing
+BATCH_PAUSE_SECS = 5       # seconds to pause between batches
+PER_REQUEST_DELAY = 0.3    # seconds between individual requests
+MAX_RETRIES = 4            # retries on 429 / transient errors
+INITIAL_BACKOFF = 2        # starting backoff in seconds (doubles each retry)
+
 ALL_BUSINESSES_CSV = "all_businesses.csv"
 WEBSITES_CSV = "businesses_with_websites.csv"
 NO_WEBSITE_CSV = "businesses_no_website.csv"
@@ -191,7 +198,11 @@ def extract_city_from_address(address):
 
 
 def search_places(api_key, query, page_token=None):
-    """Execute a single Places API text search request."""
+    """Execute a single Places API text search request with retry logic.
+
+    Retries up to MAX_RETRIES times on 429 (rate limit) or 5xx errors
+    using exponential backoff.
+    """
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
@@ -201,7 +212,22 @@ def search_places(api_key, query, page_token=None):
     if page_token:
         body["pageToken"] = page_token
 
-    resp = requests.post(PLACES_API_URL, headers=headers, json=body, timeout=30)
+    backoff = INITIAL_BACKOFF
+    for attempt in range(1, MAX_RETRIES + 1):
+        resp = requests.post(PLACES_API_URL, headers=headers, json=body, timeout=30)
+
+        if resp.status_code == 429 or resp.status_code >= 500:
+            if attempt < MAX_RETRIES:
+                print(f"    [RATE LIMIT] {resp.status_code} on attempt {attempt}, "
+                      f"retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            # Last attempt — let raise_for_status handle it
+        resp.raise_for_status()
+        return resp.json()
+
+    # Should not reach here, but just in case
     resp.raise_for_status()
     return resp.json()
 
@@ -241,12 +267,16 @@ def scrape_places(api_key):
     total_queries = len(CITIES) * len(CATEGORIES)
     completed = 0
 
+    total_batches = (total_queries + BATCH_SIZE - 1) // BATCH_SIZE
+
     print(f"\n{'='*60}")
     print("STEP 1: Scraping Google Places API (top {0} local pack)".format(LOCAL_PACK_LIMIT))
     print(f"{'='*60}")
     print(f"Cities: {len(CITIES)}")
     print(f"Niches: {len(CATEGORIES)}")
     print(f"Total queries: {total_queries}")
+    print(f"Batch size: {BATCH_SIZE}  |  Batches: {total_batches}")
+    print(f"Delay: {PER_REQUEST_DELAY}s/request  |  {BATCH_PAUSE_SECS}s between batches")
     print(f"Max results per query: {LOCAL_PACK_LIMIT}")
     print()
 
@@ -289,7 +319,20 @@ def scrape_places(api_key):
             except Exception as e:
                 print(f"  [ERROR] {query}: {e}")
 
-            time.sleep(0.15)
+            # Per-request delay
+            time.sleep(PER_REQUEST_DELAY)
+
+            # Batch boundary: pause longer and save intermediate results
+            if completed % BATCH_SIZE == 0 and completed < total_queries:
+                batch_num = completed // BATCH_SIZE
+                # Save intermediate results so nothing is lost if we crash
+                _write_csv(ALL_BUSINESSES_CSV, CSV_FIELDS, list(all_businesses.values()))
+                print(
+                    f"\n  --- Batch {batch_num}/{total_batches} complete "
+                    f"({len(all_businesses)} unique so far) — "
+                    f"pausing {BATCH_PAUSE_SECS}s for rate limits ---\n"
+                )
+                time.sleep(BATCH_PAUSE_SECS)
 
     # Split into: with websites / without websites
     all_list = list(all_businesses.values())
