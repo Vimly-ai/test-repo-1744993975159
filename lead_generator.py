@@ -468,6 +468,8 @@ LEAD_COLUMNS = [
     ("Final URL",        "final_url"),
     ("HTTP Status",      "status_code"),
     ("Page Size (bytes)","page_size"),
+    ("WHOIS Expiry",     "whois_expiry"),
+    ("Days Until Expiry","whois_days_left"),
     ("Notes",            "notes"),
 ]
 
@@ -515,6 +517,12 @@ def generate_report(results: list[dict], output_path: str) -> None:
     tier1 = [r for r in results if r.get("tier") == "tier1"]
     tier2 = [r for r in results if r.get("tier") == "tier2"]
     active = [r for r in results if r.get("tier") == "active"]
+    expiring_soon = [
+        r for r in results
+        if r.get("whois_days_left") not in ("", None)
+        and isinstance(r.get("whois_days_left"), (int, float))
+        and 0 <= int(r["whois_days_left"]) <= 90
+    ]
 
     # Sort leads by review count desc
     def _rc(r):
@@ -548,7 +556,18 @@ def generate_report(results: list[dict], output_path: str) -> None:
     _sum_row("Total Businesses Scanned", len(results), row); row += 1
     _sum_row("🔥 Confirmed Landers (Tier 1)", len(tier1), row); row += 1
     _sum_row("⚠ Suspicious (Tier 2)", len(tier2), row); row += 1
-    _sum_row("✅ Active Sites", len(active), row); row += 2
+    _sum_row("✅ Active Sites", len(active), row); row += 1
+    _sum_row("📅 Expiring Within 90 Days (any tier)", len(expiring_soon), row); row += 2
+
+    whois_expired = [r for r in results if str(r.get("whois_days_left", "")).lstrip("-").isdigit()
+                     and int(r.get("whois_days_left", 1)) < 0]
+    _sum_row("  WHOIS Already Expired", len(whois_expired), row); row += 1
+    within_30 = [r for r in expiring_soon if int(r["whois_days_left"]) <= 30]
+    within_60 = [r for r in expiring_soon if 30 < int(r["whois_days_left"]) <= 60]
+    within_90 = [r for r in expiring_soon if 60 < int(r["whois_days_left"]) <= 90]
+    _sum_row("  Expiring within 30 days", len(within_30), row); row += 1
+    _sum_row("  Expiring within 31–60 days", len(within_60), row); row += 1
+    _sum_row("  Expiring within 61–90 days", len(within_90), row); row += 2
 
     ws_sum.cell(row=row, column=1, value="By Lander Type").font = Font(bold=True, size=12)
     row += 1
@@ -588,7 +607,19 @@ def generate_report(results: list[dict], output_path: str) -> None:
     ws_t2.freeze_panes = "A2"
     _auto_fit(ws_t2)
 
-    # ── Sheet 4: All Businesses ────────────────────────────────────
+    # ── Sheet 4: Expiring Soon ────────────────────────────────────
+    EXPIRY_ORANGE = _hex_fill("FFE0B2")  # orange tint for expiring soon
+    ws_exp = wb.create_sheet("Expiring Soon")
+    _write_header(ws_exp, LEAD_COLUMNS)
+    expiring_sorted = sorted(
+        expiring_soon,
+        key=lambda r: int(r.get("whois_days_left", 9999)),
+    )
+    _write_rows(ws_exp, expiring_sorted, LEAD_COLUMNS, lambda r, i: EXPIRY_ORANGE)
+    ws_exp.freeze_panes = "A2"
+    _auto_fit(ws_exp)
+
+    # ── Sheet 5: All Businesses ────────────────────────────────────
     ws_all = wb.create_sheet("All Businesses")
     all_columns = LEAD_COLUMNS + [
         ("Tier", "tier"),
@@ -611,54 +642,133 @@ def generate_report(results: list[dict], output_path: str) -> None:
 
 # ─────────────────────────── WHOIS CHECK ───────────────────────────
 
-def check_whois_expiry(domain: str) -> str:
+def check_whois_expiry(domain: str) -> tuple[str, int | None]:
     """
-    Quick WHOIS expiry check via whois.domaintools.com JSON API (no auth needed for basic).
-    Falls back gracefully if unavailable.
-    Returns a string description or empty string.
+    Look up WHOIS expiry for a domain.
+    Returns (expiry_date_str, days_left) where days_left is:
+      - negative  → already expired
+      - 0+        → days until expiry
+      - None      → could not determine
     """
     try:
-        # Use python-whois if installed, otherwise skip
         import whois as pythonwhois
         w = pythonwhois.query(domain)
         exp = w.expiration_date
-        if exp:
-            if isinstance(exp, list):
-                exp = exp[0]
-            now = datetime.utcnow()
-            if exp < now:
-                return f"EXPIRED {exp.strftime('%Y-%m-%d')}"
-            days_left = (exp - now).days
-            if days_left <= 30:
-                return f"Expires soon: {exp.strftime('%Y-%m-%d')} ({days_left}d)"
-            return f"Expires: {exp.strftime('%Y-%m-%d')}"
+        if not exp:
+            return "", None
+        if isinstance(exp, list):
+            exp = exp[0]
+        now = datetime.utcnow()
+        # Strip timezone if present so comparison works
+        if hasattr(exp, "tzinfo") and exp.tzinfo is not None:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+        days_left = (exp - now).days
+        return exp.strftime("%Y-%m-%d"), days_left
     except ImportError:
-        pass  # whois not installed — skip
+        pass  # python-whois not installed
     except Exception:
         pass
-    return ""
+    return "", None
 
 
-def enrich_with_whois(results: list[dict]) -> list[dict]:
-    """Add WHOIS expiry info to tier1/tier2 records."""
-    print("\n  Running WHOIS lookups on leads (this may take a while)...", flush=True)
-    enriched = 0
-    for r in results:
-        if r.get("tier") not in ("tier1", "tier2"):
-            continue
-        url = r.get("website", "")
-        if not url:
-            continue
-        domain = urlparse(url).netloc.lstrip("www.")
-        if not domain:
-            continue
-        note = check_whois_expiry(domain)
-        if note:
-            r["notes"] = note
-            enriched += 1
-        time.sleep(0.3)  # be polite to WHOIS servers
-    print(f"  WHOIS enriched {enriched} leads.", flush=True)
-    return results
+def _whois_one(record: dict, warn_days: int) -> dict:
+    """Run WHOIS for a single record and return updated copy."""
+    url = record.get("website", "")
+    if not url:
+        return record
+    domain = urlparse(url).netloc.lstrip("www.")
+    if not domain:
+        return record
+
+    expiry_str, days_left = check_whois_expiry(domain)
+    if not expiry_str:
+        return record
+
+    record = dict(record)  # shallow copy — don't mutate original
+    record["whois_expiry"] = expiry_str
+    record["whois_days_left"] = days_left if days_left is not None else ""
+
+    if days_left is None:
+        return record
+
+    if days_left < 0:
+        # Domain already expired per WHOIS
+        record["notes"] = f"WHOIS: EXPIRED {expiry_str} ({abs(days_left)}d ago)"
+        # Elevate active sites — the domain has technically lapsed
+        if record.get("tier") == "active":
+            record["tier"] = "tier1"
+            record["lander_type"] = "WHOIS Expired"
+        elif record.get("tier") == "tier2":
+            # Keep tier2 but flag in notes (lander check may have missed it)
+            pass
+    elif days_left <= warn_days:
+        label = (
+            f"Expires in {days_left}d ({expiry_str})"
+            if days_left > 0
+            else f"Expires TODAY ({expiry_str})"
+        )
+        record["notes"] = f"WHOIS: {label}"
+        # Elevate active sites that are expiring soon to tier2
+        if record.get("tier") == "active":
+            record["tier"] = "tier2"
+            record["lander_type"] = f"Expiring Soon ({days_left}d)"
+    else:
+        record["notes"] = f"WHOIS: Expires {expiry_str} ({days_left}d)"
+
+    return record
+
+
+def enrich_with_whois(results: list[dict], warn_days: int = 90,
+                      workers: int = 10) -> list[dict]:
+    """
+    Run WHOIS lookups on ALL records (not just existing leads).
+    Active sites expiring within warn_days → elevated to tier2.
+    Active sites already expired per WHOIS → elevated to tier1.
+    Uses a thread pool so 2,000 lookups don't take forever.
+    """
+    print(
+        f"\n  Running WHOIS lookups on ALL {len(results)} domains "
+        f"(warn window: {warn_days} days, {workers} workers)...",
+        flush=True,
+    )
+
+    updated: list[dict] = [None] * len(results)  # type: ignore
+    done = 0
+    elevated_t1 = 0
+    elevated_t2 = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_idx = {
+            executor.submit(_whois_one, r, warn_days): i
+            for i, r in enumerate(results)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            rec = future.result()
+            updated[idx] = rec
+            done += 1
+
+            old_tier = results[idx].get("tier", "")
+            new_tier = rec.get("tier", "")
+            if new_tier == "tier1" and old_tier != "tier1":
+                elevated_t1 += 1
+            elif new_tier == "tier2" and old_tier not in ("tier1", "tier2"):
+                elevated_t2 += 1
+
+            if done % 100 == 0 or done == len(results):
+                print(
+                    f"  WHOIS [{done}/{len(results)}] "
+                    f"+{elevated_t1} new tier1, +{elevated_t2} new tier2",
+                    flush=True,
+                )
+
+    print(
+        f"\n  WHOIS complete — elevated {elevated_t1} to Tier 1, "
+        f"{elevated_t2} to Tier 2 (expiring within {warn_days}d).",
+        flush=True,
+    )
+    return updated
 
 
 # ─────────────────────────── MAIN ───────────────────────────
@@ -688,7 +798,13 @@ def parse_args():
     parser.add_argument(
         "--whois",
         action="store_true",
-        help="Run WHOIS expiry lookups on leads (requires 'python-whois' package)",
+        help="Run WHOIS expiry lookups on ALL businesses (requires 'python-whois' package)",
+    )
+    parser.add_argument(
+        "--whois-days",
+        type=int,
+        default=90,
+        help="Flag domains expiring within this many days as leads (default: 90)",
     )
     return parser.parse_args()
 
@@ -721,19 +837,30 @@ def main():
         businesses_to_check = load_businesses_with_websites()
         results = check_all_landers(businesses_to_check, workers=args.workers)
 
+        # Ensure WHOIS fields exist on every record before saving
+        for r in results:
+            r.setdefault("whois_expiry", "")
+            r.setdefault("whois_days_left", "")
+
         if args.whois:
-            results = enrich_with_whois(results)
+            results = enrich_with_whois(results, warn_days=args.whois_days, workers=args.workers)
 
         save_lander_results(results)
 
         tier1_count = sum(1 for r in results if r.get("tier") == "tier1")
         tier2_count = sum(1 for r in results if r.get("tier") == "tier2")
         active_count = sum(1 for r in results if r.get("tier") == "active")
+        expiring_count = sum(
+            1 for r in results
+            if str(r.get("whois_days_left", "")).lstrip("-").isdigit()
+            and 0 <= int(r["whois_days_left"]) <= args.whois_days
+        )
         print(
             f"\n  Results:\n"
             f"    🔥 Tier 1 (Confirmed Landers) : {tier1_count}\n"
             f"    ⚠  Tier 2 (Suspicious)        : {tier2_count}\n"
-            f"    ✅ Active                      : {active_count}",
+            f"    ✅ Active                      : {active_count}\n"
+            f"    📅 Expiring ≤{args.whois_days}d (WHOIS) : {expiring_count}",
             flush=True,
         )
 
